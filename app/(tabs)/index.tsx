@@ -465,6 +465,7 @@ export default function RunAnywhereDemo() {
         LiveAudioStream.start();
         setIsRecording(true);
         setTranscript('');
+        setError(null); // Clear any previous error
         console.log('[STT] Android: Started raw PCM recording');
       } catch (e: any) {
         setError(`Recording failed: ${e.message}`);
@@ -519,6 +520,7 @@ export default function RunAnywhereDemo() {
       recordingRef.current = recording;
       setIsRecording(true);
       setTranscript('');
+      setError(null); // Clear any previous error
       console.log('[STT] iOS: Started expo-av recording');
     } catch (e: any) {
       setError(`Recording failed: ${e.message}`);
@@ -656,6 +658,7 @@ export default function RunAnywhereDemo() {
       const result = await RunAnywhere.transcribeFile(cleanPath);
       console.log('[STT] Transcription result:', result);
       setTranscript(result.text || result);
+      setError(null); // Clear any previous error on success
       
     } catch (e: any) {
       console.error('[STT] Error:', e);

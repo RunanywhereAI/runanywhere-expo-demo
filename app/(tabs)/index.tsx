@@ -39,7 +39,8 @@ let audioModulesAvailable = false;
 try {
   Speech = require('expo-speech');
   Audio = require('expo-av').Audio;
-  FileSystem = require('expo-file-system');
+  // Use legacy API for SDK 54+ compatibility
+  FileSystem = require('expo-file-system/legacy');
   audioModulesAvailable = true;
 } catch (e) {
   console.log('[RunAnywhere Demo] Audio modules not available');

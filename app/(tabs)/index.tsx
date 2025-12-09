@@ -36,15 +36,24 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 let Speech: any = null;
 let Audio: any = null;
 let FileSystem: any = null;
+let LiveAudioStream: any = null;
 let audioModulesAvailable = false;
+
 try {
   Speech = require('expo-speech');
   Audio = require('expo-av').Audio;
-  // Use legacy API for SDK 54+ compatibility
   FileSystem = require('expo-file-system/legacy');
   audioModulesAvailable = true;
 } catch (e) {
-  console.log('[RunAnywhere Demo] Audio modules not available');
+  console.log('[RunAnywhere Demo] expo-av modules not available');
+}
+
+// Load LiveAudioStream for Android STT (raw PCM recording like sample app)
+try {
+  LiveAudioStream = require('react-native-live-audio-stream').default;
+  console.log('[RunAnywhere Demo] LiveAudioStream loaded');
+} catch (e) {
+  console.log('[RunAnywhere Demo] LiveAudioStream not available');
 }
 
 /**
@@ -339,7 +348,9 @@ export default function RunAnywhereDemo() {
     try {
       // downloadModel returns the local path
       const downloadedPath = await RunAnywhere.downloadModel(selectedModel.id, (progress: number) => {
-        setDownloadProgress(Math.round(progress * 100));
+        // Handle NaN/undefined progress values
+        const pct = typeof progress === 'number' && !isNaN(progress) ? Math.round(progress * 100) : 0;
+        setDownloadProgress(pct);
       });
       
       await loadModels();
@@ -421,22 +432,49 @@ export default function RunAnywhereDemo() {
   // STT Actions
   // ==========================================================================
 
+  // Audio chunks for Android raw PCM recording
+  const audioChunksRef = useRef<string[]>([]);
+  
   const handleStartRecording = async () => {
-    if (!audioModulesAvailable) {
-      Alert.alert('Rebuild Required', 'Audio recording requires expo-av. Rebuild with:\n\neas build --platform android --profile development');
+    // Android: Use LiveAudioStream for raw PCM (like sample app)
+    if (Platform.OS === 'android') {
+      if (!LiveAudioStream) {
+        Alert.alert('Rebuild Required', 'Audio recording requires react-native-live-audio-stream.\n\nRun: eas build --platform android --profile development');
+        return;
+      }
+      
+      try {
+        // Initialize LiveAudioStream (same config as sample app)
+        LiveAudioStream.init({
+          sampleRate: 16000,
+          channels: 1,
+          bitsPerSample: 16,
+          audioSource: 6, // VOICE_RECOGNITION
+          bufferSize: 4096,
+        });
+        
+        // Reset chunks
+        audioChunksRef.current = [];
+        
+        // Listen for audio data
+        LiveAudioStream.on('data', (data: string) => {
+          audioChunksRef.current.push(data);
+        });
+        
+        // Start recording
+        LiveAudioStream.start();
+        setIsRecording(true);
+        setTranscript('');
+        console.log('[STT] Android: Started raw PCM recording');
+      } catch (e: any) {
+        setError(`Recording failed: ${e.message}`);
+      }
       return;
     }
-
-    // Android limitation: expo-av uses MediaRecorder which doesn't support true WAV format
-    // The SDK requires 16kHz mono 16-bit PCM WAV for Whisper models
-    if (Platform.OS === 'android') {
-      Alert.alert(
-        'Android Limitation',
-        'STT on Android requires raw PCM audio recording which expo-av doesn\'t support.\n\n' +
-        'For full STT functionality, use the React Native sample app which includes react-native-live-audio-stream.\n\n' +
-        'iOS STT works correctly with expo-av.',
-        [{ text: 'OK' }]
-      );
+    
+    // iOS: Use expo-av
+    if (!audioModulesAvailable) {
+      Alert.alert('Rebuild Required', 'Audio recording requires expo-av.\n\nRun: eas build --platform ios --profile development');
       return;
     }
 
@@ -453,9 +491,6 @@ export default function RunAnywhereDemo() {
       });
 
       // iOS WAV format for Whisper STT compatibility
-      // Whisper requires: 16kHz, mono, 16-bit PCM WAV
-      // Note: This only works properly on iOS - expo-av on Android uses MediaRecorder
-      // which doesn't support raw PCM/WAV output
       const wavRecordingOptions = {
         isMeteringEnabled: true,
         android: {
@@ -484,30 +519,136 @@ export default function RunAnywhereDemo() {
       recordingRef.current = recording;
       setIsRecording(true);
       setTranscript('');
+      console.log('[STT] iOS: Started expo-av recording');
     } catch (e: any) {
       setError(`Recording failed: ${e.message}`);
     }
   };
 
-  const handleStopRecording = async () => {
-    if (!recordingRef.current) return;
+  // Helper: Create WAV header for STT PCM data
+  const createSTTWavHeader = (dataLength: number): ArrayBuffer => {
+    const buffer = new ArrayBuffer(44);
+    const view = new DataView(buffer);
+    const sampleRate = 16000;
+    const numChannels = 1;
+    const bitsPerSample = 16;
+    const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+    const blockAlign = numChannels * (bitsPerSample / 8);
+    
+    // RIFF header
+    view.setUint8(0, 0x52); view.setUint8(1, 0x49); view.setUint8(2, 0x46); view.setUint8(3, 0x46);
+    view.setUint32(4, 36 + dataLength, true);
+    view.setUint8(8, 0x57); view.setUint8(9, 0x41); view.setUint8(10, 0x56); view.setUint8(11, 0x45);
+    
+    // fmt chunk
+    view.setUint8(12, 0x66); view.setUint8(13, 0x6d); view.setUint8(14, 0x74); view.setUint8(15, 0x20);
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true);
+    
+    // data chunk
+    view.setUint8(36, 0x64); view.setUint8(37, 0x61); view.setUint8(38, 0x74); view.setUint8(39, 0x61);
+    view.setUint32(40, dataLength, true);
+    
+    return buffer;
+  };
 
+  const handleStopRecording = async () => {
     setIsLoading(true);
     setIsRecording(false);
 
     try {
-      await recordingRef.current.stopAndUnloadAsync();
-      const uri = recordingRef.current.getURI();
-      recordingRef.current = null;
-
-      if (!uri) {
-        setError('No audio recorded');
-        return;
+      let audioUri: string;
+      
+      // Android: Process raw PCM chunks into WAV
+      if (Platform.OS === 'android' && LiveAudioStream) {
+        LiveAudioStream.stop();
+        
+        const chunks = audioChunksRef.current;
+        console.log('[STT] Android: Processing', chunks.length, 'audio chunks');
+        
+        if (chunks.length === 0) {
+          setError('No audio recorded');
+          setIsLoading(false);
+          return;
+        }
+        
+        // Combine all chunks into PCM data
+        let totalLength = 0;
+        const decodedChunks: Uint8Array[] = [];
+        
+        for (const chunk of chunks) {
+          const decoded = Uint8Array.from(atob(chunk), c => c.charCodeAt(0));
+          decodedChunks.push(decoded);
+          totalLength += decoded.length;
+        }
+        
+        const pcmData = new Uint8Array(totalLength);
+        let offset = 0;
+        for (const chunk of decodedChunks) {
+          pcmData.set(chunk, offset);
+          offset += chunk.length;
+        }
+        
+        console.log('[STT] Android: Total PCM data:', totalLength, 'bytes');
+        
+        // Create WAV header + data
+        const wavHeader = createSTTWavHeader(totalLength);
+        const headerBytes = new Uint8Array(wavHeader);
+        const wavData = new Uint8Array(headerBytes.length + pcmData.length);
+        wavData.set(headerBytes, 0);
+        wavData.set(pcmData, headerBytes.length);
+        
+        // Convert to base64 and write to file
+        let wavBase64 = '';
+        const chunkSize = 8192;
+        for (let i = 0; i < wavData.length; i += chunkSize) {
+          const chunk = wavData.subarray(i, Math.min(i + chunkSize, wavData.length));
+          for (let j = 0; j < chunk.length; j++) {
+            wavBase64 += String.fromCharCode(chunk[j]!);
+          }
+        }
+        wavBase64 = btoa(wavBase64);
+        
+        audioUri = `${FileSystem.cacheDirectory}stt_recording_${Date.now()}.wav`;
+        await FileSystem.writeAsStringAsync(audioUri, wavBase64, { encoding: 'base64' });
+        
+        console.log('[STT] Android: WAV file written:', audioUri, 'size:', wavData.length);
+        audioChunksRef.current = [];
+      } else {
+        // iOS: Use expo-av recording
+        if (!recordingRef.current) {
+          setError('No recording in progress');
+          setIsLoading(false);
+          return;
+        }
+        
+        await recordingRef.current.stopAndUnloadAsync();
+        const uri = recordingRef.current.getURI();
+        recordingRef.current = null;
+        
+        if (!uri) {
+          setError('No audio recorded');
+          setIsLoading(false);
+          return;
+        }
+        
+        audioUri = uri;
+        console.log('[STT] iOS: Recording saved:', audioUri);
       }
 
-      const result = await RunAnywhere.transcribeFile(uri);
+      // Transcribe with RunAnywhere SDK
+      console.log('[STT] Transcribing:', audioUri);
+      const result = await RunAnywhere.transcribeFile(audioUri);
+      console.log('[STT] Transcription result:', result);
       setTranscript(result.text || result);
+      
     } catch (e: any) {
+      console.error('[STT] Error:', e);
       setError(`Transcription failed: ${e.message}`);
     } finally {
       setIsLoading(false);
@@ -719,58 +860,54 @@ export default function RunAnywhereDemo() {
     </View>
   );
 
-  const renderSTTContent = () => (
-    <View style={styles.contentSection}>
-      {/* Android limitation notice */}
-      {Platform.OS === 'android' && (
-        <View style={styles.platformNotice}>
-          <Text style={styles.platformNoticeIcon}>📱</Text>
-          <Text style={styles.platformNoticeTitle}>Android STT Limitation</Text>
-          <Text style={styles.platformNoticeText}>
-            expo-av on Android uses MediaRecorder which doesn't support raw PCM/WAV recording required by Whisper.{'\n\n'}
-            For full STT on Android, use the React Native sample app with react-native-live-audio-stream.{'\n\n'}
-            iOS STT works correctly with expo-av.
-          </Text>
-        </View>
-      )}
-      
-      {/* iOS - Full STT support */}
-      {Platform.OS === 'ios' && isModelLoaded && !audioModulesAvailable && (
-        <View style={styles.rebuildRequired}>
-          <Text style={styles.rebuildIcon}>🔧</Text>
-          <Text style={styles.rebuildTitle}>Rebuild Required for Recording</Text>
-          <Text style={styles.rebuildText}>
-            Audio recording requires expo-av.{'\n'}
-            Run: eas build --platform ios --profile development
-          </Text>
-        </View>
-      )}
-      
-      {Platform.OS === 'ios' && isModelLoaded && audioModulesAvailable && (
-        <View style={styles.recordingSection}>
-          <Animated.View style={[styles.micContainer, { transform: [{ scale: recordingAnim }] }]}>
-            <TouchableOpacity
-              style={[styles.micButton, isRecording && styles.micButtonRecording]}
-              onPress={isRecording ? handleStopRecording : handleStartRecording}
-              disabled={isLoading}
-            >
-              <Text style={styles.micIcon}>{isRecording ? '⏹️' : '🎙️'}</Text>
-            </TouchableOpacity>
-          </Animated.View>
-          <Text style={styles.recordingHint}>
-            {isRecording ? 'Tap to stop recording' : 'Tap to start recording'}
-          </Text>
-        </View>
-      )}
-      
-      {transcript !== '' && (
-        <View style={styles.transcriptBox}>
-          <Text style={styles.transcriptLabel}>📝 Transcript</Text>
-          <Text style={styles.transcriptText}>{transcript}</Text>
-        </View>
-      )}
-    </View>
-  );
+  const renderSTTContent = () => {
+    // Check if recording is available
+    const androidReady = Platform.OS === 'android' && LiveAudioStream && FileSystem;
+    const iosReady = Platform.OS === 'ios' && audioModulesAvailable;
+    const recordingAvailable = androidReady || iosReady;
+    
+    return (
+      <View style={styles.contentSection}>
+        {/* Rebuild notice if modules not available */}
+        {isModelLoaded && !recordingAvailable && (
+          <View style={styles.rebuildRequired}>
+            <Text style={styles.rebuildIcon}>🔧</Text>
+            <Text style={styles.rebuildTitle}>Rebuild Required for Recording</Text>
+            <Text style={styles.rebuildText}>
+              Audio recording requires native modules.{'\n'}
+              Run: eas build --platform {Platform.OS} --profile development
+            </Text>
+          </View>
+        )}
+        
+        {/* Recording UI - works on both platforms */}
+        {isModelLoaded && recordingAvailable && (
+          <View style={styles.recordingSection}>
+            <Animated.View style={[styles.micContainer, { transform: [{ scale: recordingAnim }] }]}>
+              <TouchableOpacity
+                style={[styles.micButton, isRecording && styles.micButtonRecording]}
+                onPress={isRecording ? handleStopRecording : handleStartRecording}
+                disabled={isLoading}
+              >
+                <Text style={styles.micIcon}>{isRecording ? '⏹️' : '🎙️'}</Text>
+              </TouchableOpacity>
+            </Animated.View>
+            <Text style={styles.recordingHint}>
+              {isRecording ? 'Tap to stop recording' : 'Tap to start recording'}
+            </Text>
+            {isLoading && <Text style={styles.processingText}>Processing...</Text>}
+          </View>
+        )}
+        
+        {transcript !== '' && (
+          <View style={styles.transcriptBox}>
+            <Text style={styles.transcriptLabel}>📝 Transcript</Text>
+            <Text style={styles.transcriptText}>{transcript}</Text>
+          </View>
+        )}
+      </View>
+    );
+  };
 
   const renderTTSContent = () => {
     const isSystemTTS = selectedModel?.id === 'system-tts';
@@ -918,7 +1055,7 @@ export default function RunAnywhereDemo() {
                     disabled={isDownloading}
                   >
                     {isDownloading ? (
-                      <Text style={styles.downloadButtonText}>📥 {downloadProgress}%</Text>
+                      <Text style={styles.downloadButtonText}>📥 {downloadProgress > 0 ? `${downloadProgress}%` : 'Starting...'}</Text>
                     ) : (
                       <Text style={styles.downloadButtonText}>📥 Download {selectedModel.name}</Text>
                     )}
@@ -1368,6 +1505,11 @@ const styles = StyleSheet.create({
   recordingHint: {
     color: '#888',
     fontSize: 14,
+  },
+  processingText: {
+    color: '#4A90D9',
+    fontSize: 14,
+    marginTop: 12,
   },
   transcriptBox: {
     backgroundColor: '#1a1a2a',

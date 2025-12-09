@@ -145,7 +145,7 @@ export default function HomeScreen() {
         
         const hasGGUF = models.some((m: ModelInfo) => m.category === 'language');
         const hasSTT = models.some((m: ModelInfo) => m.category === 'speech-recognition');
-        const hasTTS = models.some((m: ModelInfo) => m.category === 'text-to-speech');
+        const hasTTS = models.some((m: ModelInfo) => m.category === 'speech-synthesis');
         
         if (hasGGUF) providers.push('LlamaCpp (GGUF)');
         if (hasSTT || hasTTS) providers.push('ONNX Runtime (STT/TTS)');
@@ -340,7 +340,7 @@ export default function HomeScreen() {
     setError(null);
     
     try {
-      const ttsModels = getModelsForCategory('text-to-speech');
+      const ttsModels = getModelsForCategory('speech-synthesis');
       console.log('TTS models:', ttsModels);
       
       let model = ttsModels.find(m => m.isDownloaded);

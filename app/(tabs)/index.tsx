@@ -45,14 +45,29 @@ try {
   console.log('[RunAnywhere Demo] Audio modules not available');
 }
 
+// Helper: Convert Uint8Array to base64 in chunks (avoids stack overflow)
+const uint8ArrayToBase64 = (bytes: Uint8Array): string => {
+  const chunkSize = 8192;
+  let result = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    result += String.fromCharCode.apply(null, Array.from(chunk));
+  }
+  return btoa(result);
+};
+
 // Helper: Create WAV file from raw PCM base64 data
 const createWavFile = async (pcmBase64: string, sampleRate: number): Promise<string | null> => {
   if (!FileSystem) return null;
   
   try {
-    // Decode base64 to get PCM bytes
-    const pcmBytes = Uint8Array.from(atob(pcmBase64), c => c.charCodeAt(0));
-    const numSamples = pcmBytes.length / 2; // 16-bit samples
+    // Decode base64 to get PCM bytes (in chunks to avoid stack overflow)
+    const binaryString = atob(pcmBase64);
+    const pcmBytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      pcmBytes[i] = binaryString.charCodeAt(i);
+    }
+    
     const numChannels = 1;
     const bitsPerSample = 16;
     const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
@@ -88,8 +103,8 @@ const createWavFile = async (pcmBase64: string, sampleRate: number): Promise<str
     wavBytes.set(new Uint8Array(header), 0);
     wavBytes.set(pcmBytes, 44);
 
-    // Convert to base64
-    const wavBase64 = btoa(String.fromCharCode(...wavBytes));
+    // Convert to base64 in chunks (avoids stack overflow for large files)
+    const wavBase64 = uint8ArrayToBase64(wavBytes);
     
     // Save to file
     const filePath = `${FileSystem.cacheDirectory}tts_output_${Date.now()}.wav`;
@@ -97,6 +112,7 @@ const createWavFile = async (pcmBase64: string, sampleRate: number): Promise<str
       encoding: FileSystem.EncodingType.Base64,
     });
     
+    console.log('[TTS] WAV file created:', filePath, 'size:', wavBytes.length);
     return filePath;
   } catch (e) {
     console.log('[TTS] WAV creation error:', e);

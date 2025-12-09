@@ -382,7 +382,10 @@ export default function RunAnywhereDemo() {
   // ==========================================================================
 
   const handleSpeak = async () => {
-    if (!ttsText.trim()) return;
+    if (!ttsText.trim()) {
+      setError('Please enter text to speak');
+      return;
+    }
 
     if (selectedModel?.id === 'system-tts') {
       // Use System TTS
@@ -405,17 +408,25 @@ export default function RunAnywhereDemo() {
         onError: () => setIsSpeaking(false),
       });
     } else {
-      // Use Neural TTS
+      // Use Neural TTS - check if model is actually loaded
+      if (!isModelLoaded) {
+        setError('Please load a TTS model first');
+        return;
+      }
+      
       setIsLoading(true);
+      setError(null);
+      setIsSpeaking(true);
+      
       try {
         const result = await RunAnywhere.synthesize(ttsText, { rate: 1.0, pitch: 1.0 });
-        setResponse(`🔊 Audio generated: ${result.audioPath || result.filePath || 'Success'}`);
-        setIsSpeaking(true);
-        setTimeout(() => setIsSpeaking(false), 2000);
+        const audioPath = result?.audioPath || result?.filePath || result;
+        setResponse(`🔊 Audio generated!\n\nFile: ${audioPath}\n\n💡 To play audio, rebuild with expo-av`);
       } catch (e: any) {
         setError(`Synthesis failed: ${e.message}`);
       } finally {
         setIsLoading(false);
+        setIsSpeaking(false);
       }
     }
   };
@@ -558,49 +569,101 @@ export default function RunAnywhereDemo() {
     </View>
   );
 
-  const renderTTSContent = () => (
-    <View style={styles.contentSection}>
-      {(isModelLoaded || selectedModel?.id === 'system-tts') && (
-        <>
-          <TextInput
-            style={styles.input}
-            value={ttsText}
-            onChangeText={setTtsText}
-            placeholder="Enter text to speak..."
-            placeholderTextColor="#666"
-            multiline
-          />
-          
-          <View style={styles.speakingSection}>
-            <Animated.View style={{ transform: [{ scale: speakingAnim }] }}>
-              <Text style={styles.catEmoji}>{isSpeaking ? '🐱' : '😺'}</Text>
-            </Animated.View>
-            {isSpeaking && <Text style={styles.speakingText}>Speaking...</Text>}
+  const renderTTSContent = () => {
+    const isSystemTTS = selectedModel?.id === 'system-tts';
+    const canUseSystemTTS = isSystemTTS && audioModulesAvailable;
+    const canUseNeuralTTS = isModelLoaded && !isSystemTTS;
+    
+    return (
+      <View style={styles.contentSection}>
+        {/* System TTS selected but expo-speech not available */}
+        {isSystemTTS && !audioModulesAvailable && (
+          <View style={styles.rebuildRequired}>
+            <Text style={styles.rebuildIcon}>🔧</Text>
+            <Text style={styles.rebuildTitle}>Rebuild Required for System TTS</Text>
+            <Text style={styles.rebuildText}>
+              System TTS requires expo-speech.{'\n'}
+              Run: eas build --platform android --profile development
+            </Text>
           </View>
-          
-          <TouchableOpacity
-            style={[styles.actionButton, isSpeaking && styles.stopButton]}
-            onPress={handleSpeak}
-            disabled={isLoading}
-          >
-            {isLoading ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
+        )}
+        
+        {/* Neural TTS - needs model loaded */}
+        {!isSystemTTS && isModelLoaded && (
+          <>
+            <TextInput
+              style={styles.input}
+              value={ttsText}
+              onChangeText={setTtsText}
+              placeholder="Enter text to speak..."
+              placeholderTextColor="#666"
+              multiline
+            />
+            
+            <View style={styles.speakingSection}>
+              <Animated.View style={{ transform: [{ scale: speakingAnim }] }}>
+                <Text style={styles.catEmoji}>{isSpeaking ? '🐱' : '😺'}</Text>
+              </Animated.View>
+              {isSpeaking && <Text style={styles.speakingText}>Synthesizing...</Text>}
+            </View>
+            
+            <TouchableOpacity
+              style={[styles.actionButton, isSpeaking && styles.stopButton]}
+              onPress={handleSpeak}
+              disabled={isLoading}
+            >
+              {isLoading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.actionButtonText}>🔊 Synthesize</Text>
+              )}
+            </TouchableOpacity>
+            
+            <Text style={styles.ttsHint}>
+              💡 Neural TTS generates audio file. Playback requires rebuild with expo-av.
+            </Text>
+          </>
+        )}
+        
+        {/* System TTS - working */}
+        {canUseSystemTTS && (
+          <>
+            <TextInput
+              style={styles.input}
+              value={ttsText}
+              onChangeText={setTtsText}
+              placeholder="Enter text to speak..."
+              placeholderTextColor="#666"
+              multiline
+            />
+            
+            <View style={styles.speakingSection}>
+              <Animated.View style={{ transform: [{ scale: speakingAnim }] }}>
+                <Text style={styles.catEmoji}>{isSpeaking ? '🐱' : '😺'}</Text>
+              </Animated.View>
+              {isSpeaking && <Text style={styles.speakingText}>Speaking...</Text>}
+            </View>
+            
+            <TouchableOpacity
+              style={[styles.actionButton, isSpeaking && styles.stopButton]}
+              onPress={handleSpeak}
+              disabled={isLoading}
+            >
               <Text style={styles.actionButtonText}>
                 {isSpeaking ? '⏹️ Stop' : '🔊 Speak'}
               </Text>
-            )}
-          </TouchableOpacity>
-        </>
-      )}
-      
-      {response !== '' && (
-        <View style={styles.responseBox}>
-          <Text style={styles.responseText}>{response}</Text>
-        </View>
-      )}
-    </View>
-  );
+            </TouchableOpacity>
+          </>
+        )}
+        
+        {response !== '' && (
+          <View style={styles.responseBox}>
+            <Text style={styles.responseText}>{response}</Text>
+          </View>
+        )}
+      </View>
+    );
+  };
 
   return (
     <SafeAreaView style={styles.container}>
@@ -1108,6 +1171,13 @@ const styles = StyleSheet.create({
     color: '#4CAF50',
     fontSize: 14,
     marginTop: 8,
+  },
+  ttsHint: {
+    color: '#666',
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 12,
+    fontStyle: 'italic',
   },
   
   // SDK Not Available

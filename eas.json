@@ -26,9 +26,5 @@
   },
   "submit": {
     "production": {}
-  },
-  "_comments": {
-    "ios-testflight": "To enable iOS public distribution (vibe coding for everyone), add a profile with 'distribution': 'store' and submit to TestFlight. See: https://docs.expo.dev/submit/ios/"
   }
 }
-
